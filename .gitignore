@@ -1,5 +1,7 @@
-elapsedMillis.h
-FiniteStateMachine.cpp
-FiniteStateMachine.h
+elapsedMillis*
+FiniteStateMachine*
+NCD*
+Particle*
+DS18*
 .vscode
 *.bin
