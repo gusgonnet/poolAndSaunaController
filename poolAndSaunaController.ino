@@ -35,7 +35,7 @@
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.02";
+String VERSION = "Version 0.03";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -44,6 +44,11 @@ SYSTEM_MODE(AUTOMATIC);
        * Initial version
  * changes in version 0.02:
        * Logic is working now
+ * changes in version 0.03:
+       * Fixing unstable temperature samples
+       * adding minimum time in state
+       * adding setCalibration function
+       * added turnOffAllRelays at boot time
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -85,10 +90,13 @@ String state = STATE_INIT;
 #define MILLISECONDS_TO_MINUTES 60000
 #define MILLISECONDS_TO_SECONDS 1000
 
-// seconds for the init cycle, so sensor samples get stabilized
-// let's try 10 seconds
+// 10 seconds for the init cycle, so sensor samples get stabilized
 // units: seconds
-const unsigned long initTimeout = 5000;
+int initTimeout = 10;
+
+// a state has to have a minimum duration time: this is now one minute
+// units: minutes
+int minimumTimeInState = 1;
 
 /*******************************************************************************
  temperature sensor and variables
@@ -97,8 +105,8 @@ const unsigned long initTimeout = 5000;
 DS18B20 ds18b20 = DS18B20(D2);
 int dsAttempts = 0;
 
-// Sample temperature sensor every 5 seconds
-#define TEMPERATURE_SAMPLE_INTERVAL 5 * MILLISECONDS_TO_SECONDS
+// Sample temperature sensor every 30 seconds
+#define TEMPERATURE_SAMPLE_INTERVAL 30 * MILLISECONDS_TO_SECONDS
 elapsedMillis temperatureSampleInterval;
 
 //temperature related variables
@@ -139,6 +147,7 @@ void setup()
   // Up to 20 cloud variables may be registered and each variable name is limited to a maximum of 12 characters.
   Particle.variable("temperature", temperatureCurrent);
   Particle.variable("target", temperatureTarget);
+  Particle.variable("calibration", temperatureCalibration);
 
   // This variable informs the state of the system
   Particle.variable("state", state);
@@ -147,10 +156,15 @@ void setup()
   // https://docs.particle.io/reference/firmware/photon/#particle-function-
   // Up to 15 cloud functions may be registered and each function name is limited to a maximum of 12 characters.
   Particle.function("setTarget", setTarget);
+  Particle.function("setCalbrtion", setCalibration);
 
   Time.zone(TIME_ZONE);
 
-  relayController.setAddress(0,0,0);
+  relayController.setAddress(0, 0, 0);
+
+  // this is needed if you are flashing new versions while there is one or more relays activated
+  // they will remain active if we don't turn them off
+  relayController.turnOffAllRelays();
 }
 
 /*******************************************************************************
@@ -210,12 +224,44 @@ int setTarget(String parameter)
   if ((localValue >= 0) && (localValue <= 125))
   {
     temperatureTarget = localValue;
-    Particle.publish(APP_NAME, "Setting temperature target to " + parameter, PRIVATE);
+    Particle.publish(APP_NAME, "Setting temperature target to " + double2string(temperatureTarget), PRIVATE);
 
     return 0;
   }
 
   Particle.publish(APP_NAME, "Failed to set termperature target to " + parameter + " (0<=value<=125)", PRIVATE);
+  return -1;
+}
+
+/*******************************************************************************
+ * Function Name  : setCalibration
+ * Description    : this function sets the calibration of the temperature
+ * Parameters     : String parameter: the calibration value
+                     Value has to be between -50 and 50. Anything else is ignored
+ * Return         : 0 if success, -1 if fails
+ *******************************************************************************/
+int setCalibration(String parameter)
+{
+
+  double localValue = atoi(parameter);
+
+  if ((localValue >= -50) && (localValue <= 50))
+  {
+
+    // rollback previous calibration adjustment
+    temperatureCurrent = temperatureCurrent - temperatureCalibration;
+    
+    temperatureCalibration = localValue;
+
+    // apply new calibration adjustment
+    temperatureCurrent = temperatureCurrent + temperatureCalibration;
+
+    Particle.publish(APP_NAME, "Setting temperature calibration to " + double2string(temperatureCalibration), PRIVATE);
+
+    return 0;
+  }
+
+  Particle.publish(APP_NAME, "Failed to set temperature calibration to " + parameter + " (-50<=value<=50)", PRIVATE);
   return -1;
 }
 
@@ -246,10 +292,7 @@ void readTemperature()
 
   getTemp();
 
-  if (ds18b20.crcCheck())
-  {
-    Particle.publish(APP_NAME, "Temperature: " + double2string(temperatureCurrent), PRIVATE);
-  }
+  Particle.publish(APP_NAME, "Temperature: " + double2string(temperatureCurrent), PRIVATE);
 }
 
 /*******************************************************************************
@@ -258,23 +301,26 @@ void readTemperature()
                      passed as parameter with 2 decimals
  * Return         : the string
  *******************************************************************************/
-String double2string( double doubleNumber )
+String double2string(double doubleNumber)
 {
   String stringNumber = String(doubleNumber);
 
   //return only 2 decimals
   // Example: show 19.00 instead of 19.000000
-  stringNumber = stringNumber.substring(0, stringNumber.length()-4);
+  stringNumber = stringNumber.substring(0, stringNumber.length() - 4);
 
   return stringNumber;
 }
 
 void getTemp()
 {
+
+  double temperatureLocal = INVALID;
+
   if (!ds18b20.search())
   {
     ds18b20.resetsearch();
-    temperatureCurrent = ds18b20.getTemperature();
+    temperatureLocal = ds18b20.getTemperature();
     while (!ds18b20.crcCheck() && dsAttempts < 4)
     {
       dsAttempts++;
@@ -283,18 +329,24 @@ void getTemp()
         delay(1000);
       }
       ds18b20.resetsearch();
-      temperatureCurrent = ds18b20.getTemperature();
+      temperatureLocal = ds18b20.getTemperature();
       continue;
     }
     dsAttempts = 0;
 
     if (useFahrenheit)
     {
-      temperatureCurrent = ds18b20.convertToFahrenheit(temperatureCurrent);
+      temperatureLocal = ds18b20.convertToFahrenheit(temperatureLocal);
     }
 
     // calibrate values
-    temperatureCurrent = temperatureCurrent + temperatureCalibration;
+    temperatureLocal = temperatureLocal + temperatureCalibration;
+
+    // if reading is valid, take it
+    if ((temperatureLocal != INVALID) && (ds18b20.crcCheck()))
+    {
+      temperatureCurrent = temperatureLocal;
+    }
   }
 }
 
@@ -320,7 +372,7 @@ void initEnterFunction()
 void initUpdateFunction()
 {
   // is time up? no, then come back later
-  if (pumpStateMachine.timeInCurrentState() < initTimeout)
+  if (pumpStateMachine.timeInCurrentState() < (initTimeout * MILLISECONDS_TO_SECONDS))
   {
     return;
   }
@@ -344,6 +396,13 @@ void offEnterFunction()
 }
 void offUpdateFunction()
 {
+
+  // is minimum time up? no, then come back later
+  if (pumpStateMachine.timeInCurrentState() < (minimumTimeInState * MILLISECONDS_TO_MINUTES))
+  {
+    return;
+  }
+
   //if the temperature is lower than the threshold, transition to onState
   // temperature is equal to INVALID at boot time until a valid temperature is measured
   if ((temperatureCurrent != INVALID) && (temperatureCurrent <= temperatureTarget - temperatureMargin))
@@ -370,6 +429,12 @@ void onEnterFunction()
 }
 void onUpdateFunction()
 {
+
+  // is minimum time up? no, then come back later
+  if (pumpStateMachine.timeInCurrentState() < (minimumTimeInState * MILLISECONDS_TO_MINUTES))
+  {
+    return;
+  }
 
   //if the temperature is higher than the threshold, transition to offState
   // temperature is equal to INVALID at boot time until a valid temperature is measured
