@@ -35,7 +35,7 @@
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.03";
+String VERSION = "Version 0.04";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -49,6 +49,8 @@ SYSTEM_MODE(AUTOMATIC);
        * adding minimum time in state
        * adding setCalibration function
        * added turnOffAllRelays at boot time
+ * changes in version 0.04:
+       * Storing settings in EEPROM
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -103,7 +105,6 @@ int minimumTimeInState = 1;
 *******************************************************************************/
 //Sets Pin D2 for Temp Sensor
 DS18B20 ds18b20 = DS18B20(D2);
-int dsAttempts = 0;
 
 // Sample temperature sensor every 30 seconds
 #define TEMPERATURE_SAMPLE_INTERVAL 30 * MILLISECONDS_TO_SECONDS
@@ -131,6 +132,24 @@ const bool useFahrenheit = false;
  relay variables
 *******************************************************************************/
 NCD4Relay relayController;
+
+/*******************************************************************************
+ structure for writing thresholds in eeprom
+ https://docs.particle.io/reference/firmware/photon/#eeprom
+*******************************************************************************/
+//randomly chosen value here. The only thing that matters is that it's not 255
+// since 255 is the default value for uninitialized eeprom
+// value 137 will be used in version 0.4
+#define EEPROM_VERSION 137
+#define EEPROM_ADDRESS 0
+
+struct EepromMemoryStructure
+{
+  uint8_t version = EEPROM_VERSION;
+  double temperatureTarget;
+  double temperatureCalibration;
+};
+EepromMemoryStructure eepromMemory;
 
 /*******************************************************************************
  * Function Name  : setup
@@ -165,6 +184,9 @@ void setup()
   // this is needed if you are flashing new versions while there is one or more relays activated
   // they will remain active if we don't turn them off
   relayController.turnOffAllRelays();
+
+  //restore settings from eeprom, if there were any saved before
+  readFromEeprom();
 }
 
 /*******************************************************************************
@@ -225,7 +247,7 @@ int setTarget(String parameter)
   {
     temperatureTarget = localValue;
     Particle.publish(APP_NAME, "Setting temperature target to " + double2string(temperatureTarget), PRIVATE);
-
+    saveSettingsInEeprom();
     return 0;
   }
 
@@ -250,14 +272,15 @@ int setCalibration(String parameter)
 
     // rollback previous calibration adjustment
     temperatureCurrent = temperatureCurrent - temperatureCalibration;
-    
+
+    // store new calibration value
     temperatureCalibration = localValue;
 
     // apply new calibration adjustment
     temperatureCurrent = temperatureCurrent + temperatureCalibration;
 
     Particle.publish(APP_NAME, "Setting temperature calibration to " + double2string(temperatureCalibration), PRIVATE);
-
+    saveSettingsInEeprom();
     return 0;
   }
 
@@ -315,6 +338,7 @@ String double2string(double doubleNumber)
 void getTemp()
 {
 
+  int dsAttempts = 0;
   double temperatureLocal = INVALID;
 
   if (!ds18b20.search())
@@ -487,4 +511,57 @@ void turnOffPump()
 {
   relayController.turnOffRelay(1);
   Particle.publish(APP_NAME, "Turning off pump", PRIVATE);
+}
+
+/*******************************************************************************/
+/*******************************************************************************/
+/*******************          EEPROM FUNCTIONS         *************************/
+/********  https://docs.particle.io/reference/firmware/photon/#eeprom         **/
+/********                                                                     **/
+/********  wear and tear discussion:                                          **/
+/********  https://community.particle.io/t/eeprom-flash-wear-and-tear/23738/5 **/
+/*******************************************************************************/
+/*******************************************************************************/
+
+/*******************************************************************************
+ * Function Name  : readFromEeprom
+ * Description    : retrieves the settings from the EEPROM memory
+ * Return         : none
+ *******************************************************************************/
+void readFromEeprom()
+{
+
+  EepromMemoryStructure myObj;
+  EEPROM.get(EEPROM_ADDRESS, myObj);
+
+  //verify this eeprom was written before
+  // if version is 255 it means the eeprom was never written in the first place, hence the
+  // data just read with the previous EEPROM.get() is invalid and we will ignore it
+  if (myObj.version == EEPROM_VERSION)
+  {
+
+    temperatureTarget = myObj.temperatureTarget;
+    temperatureCalibration = myObj.temperatureCalibration;
+
+    Particle.publish(APP_NAME, "Read settings from EEPROM");
+  }
+}
+
+/*******************************************************************************
+ * Function Name  : saveSettingsInEeprom
+ * Description    : This function saves interesting data to EEPROM
+ * Return         : none
+ *******************************************************************************/
+void saveSettingsInEeprom()
+{
+
+  //store variables in the struct type that will be saved in the eeprom
+  eepromMemory.version = EEPROM_VERSION;
+  eepromMemory.temperatureTarget = temperatureTarget;
+  eepromMemory.temperatureCalibration = temperatureCalibration;
+
+  //then save
+  EEPROM.put(EEPROM_ADDRESS, eepromMemory);
+
+  Particle.publish(APP_NAME, "Stored settings on EEPROM");
 }
