@@ -17,8 +17,8 @@
 // You do not have to comply with the license for elements of the material in the public domain or where your use is permitted by an applicable exception or limitation.
 // No warranties are given. The license may not give you all of the permissions necessary for your intended use. For example, other rights such as publicity, privacy, or moral rights may limit how you use the material.
 //
-// github: https://github.com/gusgonnet/valveControl
-// hackster: https://www.hackster.io/gusgonnet/farm-irrigation-system-6551d5
+// github: https://github.com/gusgonnet/poolAndSaunaController
+// hackster: https://www.hackster.io/gusgonnet/pool-and-sauna-controller-b24a9a
 //
 // Free for personal use.
 //
@@ -37,7 +37,7 @@
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.05";
+String VERSION = "Version 0.06";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -55,6 +55,8 @@ SYSTEM_MODE(AUTOMATIC);
        * Storing settings in EEPROM
  * changes in version 0.05:
        * duplicating FSM and others to control pool and sauna
+ * changes in version 0.06:
+       * adding system on/off
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -64,19 +66,23 @@ const int TIME_ZONE = -3;
  declare FSM states with proper enter, update and exit functions
  we currently have the following states:
   - init: when the system boots up it starts in this state.
-           After some time (ten seconds), the system transitions to the off state.
-  - off:  the target temperature is being monitored.
+           After some time (ten seconds), the system transitions to the off or idle state.
+  - off:  the system is off until the user sets it to on
+           No relays are activated. Water pump is off
+  - idle:  the target temperature is being monitored.
            No relays are activated. Water pump is off
   - on :  the water pump is activated until the target temperature is reached.
            Relay for the water pump is on.
 
 State changes:
-Most likely: off -> on -> off -> on and so on
-States at power up: init -> off
+Most likely: off -> idle -> on -> idle -> on and so on
+States at power up: init -> off if previous state was off
+                    init -> idle if previous state was on or idle
 
 *******************************************************************************/
 State initState = State(initEnterFunction, initUpdateFunction, initExitFunction);
 State offState = State(offEnterFunction, offUpdateFunction, offExitFunction);
+State idleState = State(idleEnterFunction, idleUpdateFunction, idleExitFunction);
 State onState = State(onEnterFunction, onUpdateFunction, onExitFunction);
 
 //initialize state machine for the pool, start in state: init
@@ -89,8 +95,10 @@ elapsedMillis quickLoopTimer;
 // FSM states constants
 #define STATE_INIT "Initializing"
 #define STATE_OFF "Off"
+#define STATE_IDLE "Idle"
 #define STATE_ON "On"
 String state = STATE_INIT;
+String lastState = "";
 
 // timers work on millis, so we adjust the value with this constant
 #define MILLISECONDS_TO_MINUTES 60000
@@ -137,6 +145,7 @@ const bool useFahrenheit = false;
 *******************************************************************************/
 State initState2 = State(initEnterFunction2, initUpdateFunction2, initExitFunction2);
 State offState2 = State(offEnterFunction2, offUpdateFunction2, offExitFunction2);
+State idleState2 = State(idleEnterFunction2, idleUpdateFunction2, idleExitFunction2);
 State onState2 = State(onEnterFunction2, onUpdateFunction2, onExitFunction2);
 //initialize state machine for the sauna, start in state: init
 FSM stateMachine2 = FSM(initState2);
@@ -146,6 +155,7 @@ double temperatureCurrent2 = INVALID;
 double temperatureTarget2 = 37.0;
 double temperatureCalibration2 = 0;
 String state2 = STATE_INIT;
+String lastState2 = "";
 
 /*******************************************************************************
  relay variables
@@ -160,7 +170,8 @@ NCD4Relay relayController;
 // since 255 is the default value for uninitialized eeprom
 // value 137 will be used in version 0.4
 // value 138 will be used in version 0.5
-#define EEPROM_VERSION 138
+// value 139 will be used in version 0.6
+#define EEPROM_VERSION 139
 #define EEPROM_ADDRESS 0
 
 struct EepromMemoryStructure
@@ -168,8 +179,10 @@ struct EepromMemoryStructure
   uint8_t version = EEPROM_VERSION;
   double temperatureTarget;
   double temperatureCalibration;
+  uint8_t lastState;
   double temperatureTarget2;
   double temperatureCalibration2;
+  uint8_t lastState2;
 };
 EepromMemoryStructure eepromMemory;
 
@@ -195,6 +208,7 @@ void setup()
   // declare cloud functions
   // https://docs.particle.io/reference/firmware/photon/#particle-function-
   // Up to 15 cloud functions may be registered and each function name is limited to a maximum of 12 characters.
+  Particle.function("setOnOff", setOnOff);
   Particle.function("setTarget", setTarget);
   Particle.function("setCalbrtion", setCalibration);
 
@@ -205,6 +219,7 @@ void setup()
   Particle.variable("target2", temperatureTarget2);
   Particle.variable("calibration2", temperatureCalibration2);
   Particle.variable("state2", state2);
+  Particle.function("setOnOff2", setOnOff2);
   Particle.function("setTarget2", setTarget2);
   Particle.function("setCalbrtn2", setCalibration2);
 
@@ -262,6 +277,66 @@ void quickLoop()
 ********************************************************************************
 ********************************************************************************
 *******************************************************************************/
+
+/*******************************************************************************
+ * Function Name  : setOnOff
+ * Description    : this function sets the system on or off
+ * Parameters     : String parameter: on/ON/On or off/OFF/Off
+ * Return         : 0 if success, -1 if fails
+ *******************************************************************************/
+int setOnOff(String parameter)
+{
+
+  if (parameter.equalsIgnoreCase("on"))
+  {
+    // transition to on only if the system is off
+    if (state == STATE_OFF) {
+      stateMachine1.transitionTo(idleState);
+    }
+    return 0;
+  }
+  if (parameter.equalsIgnoreCase("off"))
+  {
+    // transition to off only if the system is on
+    if ( (state == STATE_IDLE) || (state == STATE_ON) ) {
+      stateMachine1.transitionTo(offState);
+    }
+    return 0;
+  }
+
+  Particle.publish(APP_NAME, "Failed to set system FSM1 to " + parameter, PRIVATE);
+  return -1;
+}
+
+/*******************************************************************************
+ * Function Name  : setOnOff2
+ * Description    : this function sets the system on or off for FSM2
+ * Parameters     : String parameter: on/ON/On or off/OFF/Off
+ * Return         : 0 if success, -1 if fails
+ *******************************************************************************/
+int setOnOff2(String parameter)
+{
+
+  if (parameter.equalsIgnoreCase("on"))
+  {
+    // transition to on only if the system is off
+    if (state2 == STATE_OFF) {
+      stateMachine2.transitionTo(idleState2);
+    }
+    return 0;
+  }
+  if (parameter.equalsIgnoreCase("off"))
+  {
+    // transition to off only if the system is on
+    if ( (state2 == STATE_IDLE) || (state2 == STATE_ON) ) {
+      stateMachine2.transitionTo(offState2);
+    }
+    return 0;
+  }
+
+  Particle.publish(APP_NAME, "Failed to set system FSM2 to " + parameter, PRIVATE);
+  return -1;
+}
 
 /*******************************************************************************
  * Function Name  : setTarget
@@ -508,13 +583,14 @@ void getTemp2()
 /*******************************************************************************
  * FSM state Name        : init 
  * Description           : when the system boots starts in this state to stabilize sensors.
-                            After some time (ten seconds), the system transitions to the idle state.
+                            After some time (ten seconds), the system transitions to the idle state or off state,
+                             depending on previous system state
 * Status of the pump     : off
 *******************************************************************************/
 void initEnterFunction()
 {
-  // set the new state and publish the change
-  setState(STATE_INIT);
+  // set the new state and publish the change, do not set lastState since we need the value from the eeprom
+  setState(STATE_INIT, false);
 }
 void initUpdateFunction()
 {
@@ -524,7 +600,14 @@ void initUpdateFunction()
     return;
   }
 
-  stateMachine1.transitionTo(offState);
+  if (lastState==STATE_IDLE)
+  {
+    stateMachine1.transitionTo(idleState);
+  }
+  else
+  {
+    stateMachine1.transitionTo(offState);
+  }
 }
 void initExitFunction()
 {
@@ -532,16 +615,33 @@ void initExitFunction()
 
 /*******************************************************************************
  * FSM state Name        : off 
- * Description           : the system is checking the temperature. When it goes under a threshold, then
-                            the On state is triggered.
+ * Description           : the system is off until the user sets it to on
  * Status of the pump    : off
 *******************************************************************************/
 void offEnterFunction()
 {
   // set the new state and publish the change
-  setState(STATE_OFF);
+  setState(STATE_OFF, true);
 }
 void offUpdateFunction()
+{
+}
+void offExitFunction()
+{
+}
+
+/*******************************************************************************
+ * FSM state Name        : idle 
+ * Description           : the system is checking the temperature. When it goes under a threshold, then
+                            the On state is triggered.
+ * Status of the pump    : off
+*******************************************************************************/
+void idleEnterFunction()
+{
+  // set the new state and publish the change
+  setState(STATE_IDLE, true);
+}
+void idleUpdateFunction()
 {
 
   // is minimum time up? no, then come back later
@@ -557,7 +657,7 @@ void offUpdateFunction()
     stateMachine1.transitionTo(onState);
   }
 }
-void offExitFunction()
+void idleExitFunction()
 {
 }
 
@@ -570,7 +670,7 @@ void offExitFunction()
 void onEnterFunction()
 {
   // set the new state and publish the change
-  setState(STATE_ON);
+  setState(STATE_ON, true);
 
   turnOnRelay(1);
 }
@@ -587,7 +687,7 @@ void onUpdateFunction()
   // temperature is equal to INVALID at boot time until a valid temperature is measured
   if ((temperatureCurrent != INVALID) && (temperatureCurrent >= temperatureTarget + temperatureMargin))
   {
-    stateMachine1.transitionTo(offState);
+    stateMachine1.transitionTo(idleState);
   }
 }
 void onExitFunction()
@@ -598,13 +698,14 @@ void onExitFunction()
 /*******************************************************************************
  * FSM state Name        : init2 
  * Description           : when the system boots starts in this state to stabilize sensors.
-                            After some time (ten seconds), the system transitions to the idle state.
+                            After some time (ten seconds), the system transitions to the idle state or off state,
+                             depending on previous system state
 * Status of the pump     : off
 *******************************************************************************/
 void initEnterFunction2()
 {
   // set the new state and publish the change
-  setState2(STATE_INIT);
+  setState2(STATE_INIT, false);
 }
 void initUpdateFunction2()
 {
@@ -614,24 +715,48 @@ void initUpdateFunction2()
     return;
   }
 
-  stateMachine2.transitionTo(offState2);
+  if (lastState2==STATE_IDLE)
+  {
+    stateMachine2.transitionTo(idleState2);
+  }
+  else
+  {
+    stateMachine2.transitionTo(offState2);
+  }
 }
 void initExitFunction2()
 {
 }
 
 /*******************************************************************************
- * FSM state Name        : off2 
- * Description           : the system is checking the temperature. When it goes under a threshold, then
-                            the On state is triggered.
+ * FSM state Name        : off2
+ * Description           : the system is off until the user sets it to on
  * Status of the pump    : off
 *******************************************************************************/
 void offEnterFunction2()
 {
   // set the new state and publish the change
-  setState2(STATE_OFF);
+  setState2(STATE_OFF, true);
 }
 void offUpdateFunction2()
+{
+}
+void offExitFunction2()
+{
+}
+
+/*******************************************************************************
+ * FSM state Name        : idle2 
+ * Description           : the system is checking the temperature. When it goes under a threshold, then
+                            the On state is triggered.
+ * Status of the pump    : off
+*******************************************************************************/
+void idleEnterFunction2()
+{
+  // set the new state and publish the change
+  setState2(STATE_IDLE, true);
+}
+void idleUpdateFunction2()
 {
 
   // is minimum time up? no, then come back later
@@ -647,7 +772,7 @@ void offUpdateFunction2()
     stateMachine2.transitionTo(onState2);
   }
 }
-void offExitFunction2()
+void idleExitFunction2()
 {
 }
 
@@ -660,7 +785,7 @@ void offExitFunction2()
 void onEnterFunction2()
 {
   // set the new state and publish the change
-  setState2(STATE_ON);
+  setState2(STATE_ON, true);
 
   turnOnRelay(2);
 }
@@ -677,7 +802,7 @@ void onUpdateFunction2()
   // temperature is equal to INVALID at boot time until a valid temperature is measured
   if ((temperatureCurrent2 != INVALID) && (temperatureCurrent2 >= temperatureTarget2 + temperatureMargin))
   {
-    stateMachine2.transitionTo(offState2);
+    stateMachine2.transitionTo(idleState2);
   }
 }
 void onExitFunction2()
@@ -715,10 +840,15 @@ String double2string(double doubleNumber)
  * Description    : sets the state of the system and publishes the change
  * Return         : none
  *******************************************************************************/
-void setState(String newState)
+void setState(String newState, bool setLastState)
 {
   state = newState;
+  if (setLastState) {
+    lastState = newState;
+  }
+
   Particle.publish(APP_NAME, "FSM1 entering " + newState + " state", PRIVATE);
+  saveSettingsInEeprom();
 }
 
 /*******************************************************************************
@@ -726,10 +856,14 @@ void setState(String newState)
  * Description    : sets the state of the second FSM and publishes the change
  * Return         : none
  *******************************************************************************/
-void setState2(String newState)
+void setState2(String newState, bool setLastState)
 {
   state2 = newState;
+  if (setLastState) {
+    lastState2 = newState;
+  }
   Particle.publish(APP_NAME, "FSM2 entering " + newState + " state", PRIVATE);
+  saveSettingsInEeprom();
 }
 
 /*******************************************************************************
@@ -783,8 +917,10 @@ void readFromEeprom()
 
     temperatureTarget = myObj.temperatureTarget;
     temperatureCalibration = myObj.temperatureCalibration;
+    lastState = convertIntToLastState(myObj.lastState);
     temperatureTarget2 = myObj.temperatureTarget2;
     temperatureCalibration2 = myObj.temperatureCalibration2;
+    lastState2 = convertIntToLastState(myObj.lastState2);
 
     Particle.publish(APP_NAME, "Read settings from EEPROM");
   }
@@ -802,11 +938,54 @@ void saveSettingsInEeprom()
   eepromMemory.version = EEPROM_VERSION;
   eepromMemory.temperatureTarget = temperatureTarget;
   eepromMemory.temperatureCalibration = temperatureCalibration;
+  eepromMemory.lastState = convertLastStateToInt(lastState);
   eepromMemory.temperatureTarget2 = temperatureTarget2;
   eepromMemory.temperatureCalibration2 = temperatureCalibration2;
+  eepromMemory.lastState2 = convertLastStateToInt(lastState2);
 
   //then save
   EEPROM.put(EEPROM_ADDRESS, eepromMemory);
 
   Particle.publish(APP_NAME, "Stored settings on EEPROM");
+}
+
+/*******************************************************************************
+ * Function Name  : convertIntToLastState
+ * Description    : converts the int lastState (saved in the eeprom) into the String mode (in RAM)
+                    The logic here is that when the system was powered off, if it was IDLE or ON, 
+                    we want it to transition to IDLE (and then automatically transition to ON if needed).
+ * Return         : String
+ *******************************************************************************/
+String convertIntToLastState(uint8_t lastSt)
+{
+
+  // we only care to store the system being on (idleState or onState) or off (offState)
+  // so if it was on/idle, we want to set the system to idle (and eventually it will turn on when the temp requires it)
+  if (lastSt == 1)
+  {
+    return STATE_IDLE;
+  }
+  
+  //in all other cases
+  return STATE_OFF;
+}
+
+/*******************************************************************************
+ * Function Name  : convertLastStateToInt
+ * Description    : converts the String lastState (in RAM) into the int mode (to be saved in the eeprom)
+                    The logic here is that when the system was powered off, if it was IDLE or ON, 
+                    we want it to transition to IDLE (and then automatically transition to ON if needed).
+ * Return         : String
+ *******************************************************************************/
+uint8_t convertLastStateToInt(String lastSt)
+{
+
+  // we only care to store the system being on (idleState or onState) or off (offState)
+  if ( (lastSt == STATE_IDLE) || (lastSt == STATE_ON) )
+  {
+    return 1;
+  }
+
+  //in all other cases
+  return 0;
 }
