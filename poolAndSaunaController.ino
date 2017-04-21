@@ -28,6 +28,40 @@
 // Datasheet: http://cdn.sparkfun.com/datasheets/Sensors/Temp/DS18B20.pdf
 //
 
+/*
+NOTE: To draw the FSM image, copy paste this uml code below in http://www.plantuml.com/plantuml/uml
+
+@startuml
+skinparam backgroundColor LightYellow
+skinparam state {
+  BackgroundColor LightBlue
+  BorderColor Gray
+  FontName Impact
+}
+
+
+[*] --> initState
+
+note left of initState : The system boots\nin this state
+
+initState: 10 seconds
+initState -down--> offState: if system was\npreviously off
+initState -down--> idleState: if system was\npreviously on
+
+
+offState: system off
+offState -left-> idleState: setOnOff("on")
+
+idleState: heating off
+idleState -down-> onState: temperature\n< target
+idleState -right-> offState: setOnOff("off")
+
+onState: heating on
+onState -up-> idleState: temperature\n> target
+onState -up-> offState: setOnOff("off")
+@enduml
+*/
+
 #include "Particle-OneWire.h"
 #include "DS18B20.h"
 #include "NCD4Relay.h"
