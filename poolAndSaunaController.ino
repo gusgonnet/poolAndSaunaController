@@ -71,7 +71,7 @@ onState -up-> offState: setOnOff("off")
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.06";
+String VERSION = "Version 0.07";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -91,6 +91,9 @@ SYSTEM_MODE(AUTOMATIC);
        * duplicating FSM and others to control pool and sauna
  * changes in version 0.06:
        * adding system on/off
+ * changes in version 0.07:
+       * addding user control for relays 3 and 4 (via a cloud function)
+       * adding third ds18b20 sensor for sensing ambient temperature
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -192,6 +195,13 @@ String state2 = STATE_INIT;
 String lastState2 = "";
 
 /*******************************************************************************
+ temperature sensor and variables for ambient sensing
+*******************************************************************************/
+//Sets Pin D4 for Ambient Temp Sensor
+DS18B20 ds18b20_3 = DS18B20(D4);
+double temperatureCurrent3 = INVALID;
+
+/*******************************************************************************
  relay variables
 *******************************************************************************/
 NCD4Relay relayController;
@@ -257,8 +267,15 @@ void setup()
   Particle.function("setTarget2", setTarget2);
   Particle.function("setCalbrtn2", setCalibration2);
 
+  /*******************************************************************************
+   cloud variables and functions for the ambient temperature
+  *******************************************************************************/
+  Particle.variable("tempAmbient", temperatureCurrent3);
+
   Time.zone(TIME_ZONE);
 
+  // this function allows the user to control relays 3 and 4 (from IFTTT for example)
+  Particle.function("controlRelay", triggerRelay);
   relayController.setAddress(0, 0, 0);
 
   // this is needed if you are flashing new versions while there is one or more relays activated
@@ -513,9 +530,11 @@ void readTemperature()
 
   getTemp();
   getTemp2();
+  getTempAmb();
 
   Particle.publish(APP_NAME, "Temperature: " + double2string(temperatureCurrent), PRIVATE);
   Particle.publish(APP_NAME, "Temperature2: " + double2string(temperatureCurrent2), PRIVATE);
+  Particle.publish(APP_NAME, "Temperature Amb: " + double2string(temperatureCurrent3), PRIVATE);
 }
 
 /*******************************************************************************
@@ -602,6 +621,47 @@ void getTemp2()
     if ((temperatureLocal != INVALID) && (ds18b20_2.crcCheck()))
     {
       temperatureCurrent2 = temperatureLocal;
+    }
+  }
+}
+
+/*******************************************************************************
+ * Function Name  : getTempAmb
+ * Description    : reads the third DS18B20 sensor (ambient)
+ * Return         : nothing
+ *******************************************************************************/
+void getTempAmb()
+{
+
+  int dsAttempts = 0;
+  double temperatureLocal = INVALID;
+
+  if (!ds18b20_3.search())
+  {
+    ds18b20_3.resetsearch();
+    temperatureLocal = ds18b20_3.getTemperature();
+    while (!ds18b20_3.crcCheck() && dsAttempts < 4)
+    {
+      dsAttempts++;
+      if (dsAttempts == 3)
+      {
+        delay(1000);
+      }
+      ds18b20_3.resetsearch();
+      temperatureLocal = ds18b20_3.getTemperature();
+      continue;
+    }
+    dsAttempts = 0;
+
+    if (useFahrenheit)
+    {
+      temperatureLocal = ds18b20_3.convertToFahrenheit(temperatureLocal);
+    }
+
+    // if reading is valid, take it
+    if ((temperatureLocal != INVALID) && (ds18b20_3.crcCheck()))
+    {
+      temperatureCurrent3 = temperatureLocal;
     }
   }
 }
@@ -1022,4 +1082,84 @@ uint8_t convertLastStateToInt(String lastSt)
 
   //in all other cases
   return 0;
+}
+
+/*******************************************************************************
+ * Function Name  : triggerRelay
+ * Description    : allows the user to control relays 3 and 4
+                    for example, the user can control them from IFTTT
+ * Parameter      : command can be "3on", "3off", "34on", "4off" and so on
+                    3toggle, 34toggle, 4momentary are also supported
+ * Return         : 0 if no relay has been changed status,
+                    1 if at least one relay changed status
+ *******************************************************************************/
+int triggerRelay(String command)
+{
+
+    //Relay Specific Command
+    int relayNumber1 = command.substring(0, 1).toInt();
+    Serial.print("relayNumber1: ");
+    Serial.println(relayNumber1);
+
+    int relayNumber2 = command.substring(1, 2).toInt();
+    Serial.print("relayNumber2: ");
+    Serial.println(relayNumber2);
+
+    // remove all digits from the beginning of the command
+    String relayCommand = command;
+    relayCommand.replace("3", " ");
+    relayCommand.replace("4", " ");
+    relayCommand.trim();
+
+    Serial.print("relayCommand:");
+    Serial.print(relayCommand);
+    Serial.println(".");
+
+    int relayNumbers[2] = {relayNumber1, relayNumber2};
+
+
+    int returnValue = 0;
+    int relayNumber;
+    int i;
+
+    // explore max 2 relays
+    for (i = 1; i <= 2; i++)
+    {
+        // analize this particular relay
+        relayNumber = relayNumbers[i-1];
+
+        // support only relays 3 and 4
+        if (relayNumber > 2)
+        {
+
+            Particle.publish("changing relay number:", String(relayNumber), 60, PRIVATE);
+
+            if (relayCommand.equalsIgnoreCase("on"))
+            {
+                Serial.println("Turning on relay");
+                relayController.turnOnRelay(relayNumber);
+                Serial.println("returning");
+                returnValue = 1;
+            }
+            if (relayCommand.equalsIgnoreCase("off"))
+            {
+                relayController.turnOffRelay(relayNumber);
+                returnValue = 1;
+            }
+            if (relayCommand.equalsIgnoreCase("toggle"))
+            {
+                relayController.toggleRelay(relayNumber);
+                returnValue = 1;
+            }
+            if (relayCommand.equalsIgnoreCase("momentary"))
+            {
+                relayController.turnOnRelay(relayNumber);
+                delay(300);
+                relayController.turnOffRelay(relayNumber);
+                returnValue = 1;
+            }
+        }
+    }
+
+    return returnValue;
 }
