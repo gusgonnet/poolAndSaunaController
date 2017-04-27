@@ -71,7 +71,7 @@ onState -up-> offState: setOnOff("off")
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.07";
+String VERSION = "Version 0.08";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -94,6 +94,8 @@ SYSTEM_MODE(AUTOMATIC);
  * changes in version 0.07:
        * addding user control for relays 3 and 4 (via a cloud function)
        * adding third ds18b20 sensor for sensing ambient temperature
+ * changes in version 0.08:
+       * upgrading control and adding function to get status of relays 3 and 4
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -206,6 +208,17 @@ double temperatureCurrent3 = INVALID;
 *******************************************************************************/
 NCD4Relay relayController;
 
+// timers for switching off the relays
+#define MILLISECONDS_TO_MINUTES 60000
+elapsedMillis timerOnRelay1;
+elapsedMillis timerOnRelay2;
+elapsedMillis timerOnRelay3;
+elapsedMillis timerOnRelay4;
+int turnOffRelay1AfterTime = 0;
+int turnOffRelay2AfterTime = 0;
+int turnOffRelay3AfterTime = 0;
+int turnOffRelay4AfterTime = 0;
+
 /*******************************************************************************
  structure for writing thresholds in eeprom
  https://docs.particle.io/reference/firmware/photon/#eeprom
@@ -276,6 +289,8 @@ void setup()
 
   // this function allows the user to control relays 3 and 4 (from IFTTT for example)
   Particle.function("controlRelay", triggerRelay);
+  // this function allows the user to query the status of relays 3 and 4 (from IFTTT for example)
+  Particle.function("relayStatus", relayStatus);
   relayController.setAddress(0, 0, 0);
 
   // this is needed if you are flashing new versions while there is one or more relays activated
@@ -319,6 +334,10 @@ void quickLoop()
   // the FSM is the heart of the program - all actions are defined by its states
   stateMachine1.update();
   stateMachine2.update();
+
+  // check if there is any relay to turn off automatically
+  turnOffRelay();
+  
 }
 
 /*******************************************************************************
@@ -1085,73 +1104,151 @@ uint8_t convertLastStateToInt(String lastSt)
 }
 
 /*******************************************************************************
+ * Function Name  : relayStatus
+ * Description    : this function returns 1 if the relay is on, 0 if the relay is off
+                    and -1 if there is an error
+ *******************************************************************************/
+int relayStatus(String relay)
+{
+    int relayNumber = relay.substring(0, 1).toInt();
+    if ((relayNumber >= 1) && (relayNumber <= 4))
+    {
+        return relayController.readRelayStatus(relayNumber);
+    }
+
+    return -1;
+}
+
+/*******************************************************************************
  * Function Name  : triggerRelay
- * Description    : allows the user to control relays 3 and 4
-                    for example, the user can control them from IFTTT
- * Parameter      : command can be "3on", "3off", "34on", "4off" and so on
-                    3toggle, 34toggle, 4momentary are also supported
- * Return         : 0 if no relay has been changed status,
-                    1 if at least one relay changed status
+ * Description    : commands accepted:
+                        - "3on", "1off" to set on/off one relay at a time
+                        - "34on", "12off", "13on", "13off" to set on/off more than one relay at a time
+                        - "34on5", "1on3", "13on40" to turn on relay(s) for a number of minutes
+                          example: "34on5" turns relays 3 and 4 on for 5 minutes
+                        - 3toggle, 34toggle, 4momentary are also supported
+ * Returns        : returns 1 if the command was accepted, 0 if not
  *******************************************************************************/
 int triggerRelay(String command)
 {
 
-    //Relay Specific Command
-    int relayNumber1 = command.substring(0, 1).toInt();
-    Serial.print("relayNumber1: ");
-    Serial.println(relayNumber1);
+    // Relay Specific Command
+    // this supports "34on", "12off", "13on", "13off" for example
+    // this supports "34on5", "1on3", "13on40" to turn on relay(s) for a number of minutes
+    String tempCommand = command.toLowerCase();
+    // this var will store the number of minutes for a relay to be on
+    int timeOn = 0;
+    int relayNumber1 = 0;
+    int relayNumber2 = 0;
+    int relayNumber3 = 0;
+    int relayNumber4 = 0;
 
-    int relayNumber2 = command.substring(1, 2).toInt();
-    Serial.print("relayNumber2: ");
-    Serial.println(relayNumber2);
+    //parse the first relay number
+    if (firstCharIsNumber1to4(tempCommand))
+    {
+        relayNumber1 = tempCommand.substring(0, 1).toInt();
+        Serial.print("relayNumber1: ");
+        Serial.println(relayNumber1);
+        //then remove the first
+        tempCommand = tempCommand.substring(1);
+    }
 
-    // remove all digits from the beginning of the command
-    String relayCommand = command;
-    relayCommand.replace("3", " ");
-    relayCommand.replace("4", " ");
-    relayCommand.trim();
+    //check if first char is a digit
+    if (firstCharIsNumber1to4(tempCommand))
+    {
+        //parse the second relay number
+        relayNumber2 = tempCommand.substring(0, 1).toInt();
+        Serial.print("relayNumber2: ");
+        Serial.println(relayNumber2);
+        //then remove the char
+        tempCommand = tempCommand.substring(1);
+    }
 
-    Serial.print("relayCommand:");
-    Serial.print(relayCommand);
+    //check if first char is a digit
+    if (firstCharIsNumber1to4(tempCommand))
+    {
+        //parse the third relay number
+        relayNumber3 = tempCommand.substring(0, 1).toInt();
+        Serial.print("relayNumber3: ");
+        Serial.println(relayNumber3);
+        //then remove the char
+        tempCommand = tempCommand.substring(1);
+    }
+
+    //check if first char is a digit
+    if (firstCharIsNumber1to4(tempCommand))
+    {
+        //parse the fourth relay number
+        relayNumber4 = tempCommand.substring(0, 1).toInt();
+        Serial.print("relayNumber4: ");
+        Serial.println(relayNumber4);
+        //then remove the char
+        tempCommand = tempCommand.substring(1);
+    }
+
+    //check if next chars are equal to on, if so, check if there was a specific ON time sent
+    // it would be after the on
+    // example: 34on50 for turning both relays 3 and 4 on for 50 minutes
+    // when the program reaches this point, 34 have already been parsed
+    // so here we would end up with on50
+    if (tempCommand.startsWith("on"))
+    {
+        //parse the digits after the on command
+        timeOn = tempCommand.substring(2).toInt();
+        Serial.print("timeOn: ");
+        Serial.println(timeOn);
+        // set the command to be on, so the digits that came after are removed
+        tempCommand = "on";
+    }
+
+    Serial.print("tempCommand:");
+    Serial.print(tempCommand);
     Serial.println(".");
 
-    int relayNumbers[2] = {relayNumber1, relayNumber2};
-
+    int relayNumbers[4] = {relayNumber1, relayNumber2, relayNumber3, relayNumber4};
 
     int returnValue = 0;
     int relayNumber;
     int i;
 
-    // explore max 2 relays
-    for (i = 1; i <= 2; i++)
+    // explore all 4 relays
+    for (i = 1; i <= 4; i++)
     {
         // analize this particular relay
-        relayNumber = relayNumbers[i-1];
+        relayNumber = relayNumbers[i - 1];
 
-        // support only relays 3 and 4
+        // allow only control of relays 3 and 4
+        // since relays 1 and 2 are used by the pool and sauna system
         if (relayNumber > 2)
         {
 
-            Particle.publish("changing relay number:", String(relayNumber), 60, PRIVATE);
+            Particle.publish("command/relay/minutes", tempCommand + "/" + String(relayNumber) + "/" + String(timeOn), 60, PRIVATE);
 
-            if (relayCommand.equalsIgnoreCase("on"))
+            if (tempCommand.equalsIgnoreCase("on"))
             {
                 Serial.println("Turning on relay");
                 relayController.turnOnRelay(relayNumber);
+
+                // if timeOn is not zero, then turn the relay off after timeOn minutes
+                if (timeOn != 0)
+                {
+                    turnOnRelayForSomeMinutes(relayNumber, timeOn);
+                }
+
                 Serial.println("returning");
                 returnValue = 1;
             }
-            if (relayCommand.equalsIgnoreCase("off"))
+            if (tempCommand.equalsIgnoreCase("off"))
             {
                 relayController.turnOffRelay(relayNumber);
                 returnValue = 1;
             }
-            if (relayCommand.equalsIgnoreCase("toggle"))
+            if (tempCommand.equalsIgnoreCase("toggle"))
             {
                 relayController.toggleRelay(relayNumber);
                 returnValue = 1;
             }
-            if (relayCommand.equalsIgnoreCase("momentary"))
+            if (tempCommand.equalsIgnoreCase("momentary"))
             {
                 relayController.turnOnRelay(relayNumber);
                 delay(300);
@@ -1162,4 +1259,100 @@ int triggerRelay(String command)
     }
 
     return returnValue;
+}
+
+/*******************************************************************************
+ * Function Name  : firstCharIsNumber1to4
+ * Description    : returns true if the parameter starts with a number between 1 and 4
+ *******************************************************************************/
+bool firstCharIsNumber1to4(String string)
+{
+    if (string.startsWith("1"))
+    {
+        return true;
+    }
+    if (string.startsWith("2"))
+    {
+        return true;
+    }
+    if (string.startsWith("3"))
+    {
+        return true;
+    }
+    if (string.startsWith("4"))
+    {
+        return true;
+    }
+    // not a 1~4 digit
+    return false;
+}
+
+/*******************************************************************************
+ * Function Name  : turnOnRelayForSomeMinutes
+ * Description    : turn a relay on for a user defined time in minutes
+ *******************************************************************************/
+void turnOnRelayForSomeMinutes(int relay, int timeOn)
+{
+
+ switch(relay) {
+     case 1:
+      relayController.turnOnRelay(relay);
+      timerOnRelay1 = 0;
+      turnOffRelay1AfterTime = timeOn*MILLISECONDS_TO_MINUTES;
+     break;
+     case 2:
+      relayController.turnOnRelay(relay);
+      timerOnRelay2 = 0;
+      turnOffRelay2AfterTime = timeOn*MILLISECONDS_TO_MINUTES;
+     break;
+     case 3:
+      relayController.turnOnRelay(relay);
+      timerOnRelay3 = 0;
+      turnOffRelay3AfterTime = timeOn*MILLISECONDS_TO_MINUTES;
+     break;
+     case 4:
+      relayController.turnOnRelay(relay);
+      timerOnRelay4 = 0;
+      turnOffRelay4AfterTime = timeOn*MILLISECONDS_TO_MINUTES;
+     break;
+ }
+
+
+}
+
+/*******************************************************************************
+ * Function Name  : turnOffRelay
+ * Description    : this function checks if there is a relay to turn off automatically
+ *******************************************************************************/
+void turnOffRelay()
+{
+
+  // is time up for relay1?
+  if ((turnOffRelay1AfterTime!=0) && (timerOnRelay1 > turnOffRelay1AfterTime))
+  {
+      turnOffRelay1AfterTime = 0;
+      relayController.turnOffRelay(1);
+  }
+
+  // is time up for relay2?
+  if ((turnOffRelay2AfterTime!=0) && (timerOnRelay2 > turnOffRelay2AfterTime))
+  {
+      turnOffRelay2AfterTime = 0;
+      relayController.turnOffRelay(2);
+  }
+
+  // is time up for relay3?
+  if ((turnOffRelay3AfterTime!=0) && (timerOnRelay3 > turnOffRelay3AfterTime))
+  {
+      turnOffRelay3AfterTime = 0;
+      relayController.turnOffRelay(3);
+  }
+
+  // is time up for relay4?
+  if ((turnOffRelay4AfterTime!=0) && (timerOnRelay4 > turnOffRelay4AfterTime))
+  {
+      turnOffRelay4AfterTime = 0;
+      relayController.turnOffRelay(4);
+  }
+
 }
