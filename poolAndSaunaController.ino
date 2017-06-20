@@ -65,13 +65,12 @@ onState -up-> offState: setOnOff("off")
 #include "Particle-OneWire.h"
 #include "DS18B20.h"
 #include "NCD4Relay.h"
-
-#include "application.h"
+#include "PietteTech_DHT.h"
 #include "elapsedMillis.h"
 #include "FiniteStateMachine.h"
 
 #define APP_NAME "poolAndSaunaController"
-String VERSION = "Version 0.08";
+String VERSION = "Version 0.09";
 
 SYSTEM_MODE(AUTOMATIC);
 
@@ -80,6 +79,7 @@ SYSTEM_MODE(AUTOMATIC);
        * Initial version
  * changes in version 0.02:
        * Logic is working now
+       * pool ds18b20 sensor on D2
  * changes in version 0.03:
        * Fixing unstable temperature samples
        * adding minimum time in state
@@ -89,13 +89,16 @@ SYSTEM_MODE(AUTOMATIC);
        * Storing settings in EEPROM
  * changes in version 0.05:
        * duplicating FSM and others to control pool and sauna
+       * pool ds18b20 sensor on D3
  * changes in version 0.06:
        * adding system on/off
  * changes in version 0.07:
        * addding user control for relays 3 and 4 (via a cloud function)
-       * adding third ds18b20 sensor for sensing ambient temperature
+       * adding third ds18b20 sensor for sensing ambient temperature on D4
  * changes in version 0.08:
        * upgrading control and adding function to get status of relays 3 and 4
+ * changes in version 0.09:
+       * adding DHT22 sensor for sensing ambient temperature and humidity on D5
 *******************************************************************************/
 
 // Argentina time zone GMT-3
@@ -204,6 +207,19 @@ DS18B20 ds18b20_3 = DS18B20(D4);
 double temperatureCurrent3 = INVALID;
 
 /*******************************************************************************
+ DHT sensor for ambient sensing
+*******************************************************************************/
+#define DHTTYPE  DHT22                // Sensor type DHT11/21/22/AM2301/AM2302
+#define DHTPIN   5                    // Digital pin for communications
+void dht_wrapper(); // must be declared before the lib initialization
+PietteTech_DHT DHT(DHTPIN, DHTTYPE, dht_wrapper);
+bool bDHTstarted;       // flag to indicate we started acquisition
+double temperatureCurrent4 = INVALID;
+double humidityCurrent4 = INVALID;
+// This wrapper is in charge of calling the DHT sensor lib
+void dht_wrapper() { DHT.isrCallback(); }
+
+/*******************************************************************************
  relay variables
 *******************************************************************************/
 NCD4Relay relayController;
@@ -284,6 +300,9 @@ void setup()
    cloud variables and functions for the ambient temperature
   *******************************************************************************/
   Particle.variable("tempAmbient", temperatureCurrent3);
+
+  Particle.variable("tempAmbieDHT", temperatureCurrent4);
+  Particle.variable("humiAmbieDHT", humidityCurrent4);
 
   Time.zone(TIME_ZONE);
 
@@ -532,7 +551,7 @@ int setCalibration2(String parameter)
 
 /*******************************************************************************
  * Function Name  : readTemperature
- * Description    : reads the temperature sensor in D2 and D3 at every TEMPERATURE_SAMPLE_INTERVAL
+ * Description    : reads the temperature sensor in D2, D3 and D4 at every TEMPERATURE_SAMPLE_INTERVAL
  * Return         : none
  *******************************************************************************/
 void readTemperature()
@@ -550,10 +569,14 @@ void readTemperature()
   getTemp();
   getTemp2();
   getTempAmb();
+  getTempAmbDHT();
 
-  Particle.publish(APP_NAME, "Temperature: " + double2string(temperatureCurrent), PRIVATE);
-  Particle.publish(APP_NAME, "Temperature2: " + double2string(temperatureCurrent2), PRIVATE);
-  Particle.publish(APP_NAME, "Temperature Amb: " + double2string(temperatureCurrent3), PRIVATE);
+  Particle.publish(APP_NAME, "Pool: " + double2string(temperatureCurrent) \
+    + ", Sauna: " + double2string(temperatureCurrent2) \
+    + ", TAmb: " + double2string(temperatureCurrent3) \
+    + ", TAmbDHT: " + double2string(temperatureCurrent4) \
+    + ", HAmbDHT: " + double2string(humidityCurrent4) \
+    , PRIVATE);
 }
 
 /*******************************************************************************
@@ -684,6 +707,48 @@ void getTempAmb()
     }
   }
 }
+
+/*******************************************************************************
+ * Function Name  : getTempAmbDHT
+ * Description    : reads the temperature of the DHT22 sensor
+ * Return         : none
+ *******************************************************************************/
+void getTempAmbDHT() {
+
+  // start the sample
+  if (!bDHTstarted) {
+    DHT.acquireAndWait(5);
+    bDHTstarted = true;
+  }
+
+  //still acquiring sample? go away and come back later
+  if (DHT.acquiring()) {
+    return;
+  }
+
+  //I observed my dht22 measuring below 0 from time to time, so let's discard that sample
+  if ( DHT.getCelsius() < 0 ) {
+    //reset the sample flag so we can take another
+    bDHTstarted = false;
+    return;
+  }
+
+    if (useFahrenheit)
+    {
+      temperatureCurrent4 = DHT.getFahrenheit();
+    }
+    else
+    {
+      temperatureCurrent4 = DHT.getCelsius();
+    }
+
+  humidityCurrent4 = DHT.getHumidity();
+
+  //reset the sample flag so we can take another
+  bDHTstarted = false;
+
+}
+
 
 /*******************************************************************************
 ********************************************************************************
