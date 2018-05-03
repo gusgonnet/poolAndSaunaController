@@ -98,6 +98,7 @@ SYSTEM_MODE(AUTOMATIC);
  * changes in version 0.08:
        * upgrading control and adding function to get status of relays 3 and 4
  * changes in version 0.09:
+       * Particle build share link: https://go.particle.io/shared_apps/5aea75975ae4dfa4a4000e46
        * adding DHT22 sensor for sensing ambient temperature and humidity on D5
 *******************************************************************************/
 
